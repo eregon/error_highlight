@@ -1,6 +1,8 @@
 require_relative "version"
 
 module ErrorHighlight
+  COMPILED_BY_PRISM = RubyVM::InstructionSequence.compile("").to_a[4][:parser] == :prism
+
   # Identify the code fragment where a given exception occurred.
   #
   # Options:
@@ -54,16 +56,70 @@ module ErrorHighlight
 
       return nil unless Thread::Backtrace::Location === loc
 
-      node =
-        begin
-          RubyVM::AbstractSyntaxTree.of(loc, keep_script_lines: true)
-        rescue RuntimeError => error
-          # RubyVM::AbstractSyntaxTree.of raises an error with a message that
-          # includes "prism" when the ISEQ was compiled with the prism compiler.
-          # In this case, we'll try to parse again with prism instead.
-          raise unless error.message.include?("prism")
-          prism_find(loc)
-        end
+      # Simulate getting line & column information
+      # Either way works:
+      if !COMPILED_BY_PRISM
+        # get line & column from parse.y
+        node = RubyVM::AbstractSyntaxTree.of(loc, keep_script_lines: true)
+        return unless node
+        first_lineno, first_column, last_lineno, last_column = node.first_lineno, node.first_column, node.last_lineno, node.last_column
+        # Fix parse.y call locations, they are all like `1.time {...}` and parse.y stops after 'e' and does not include the block in the "call node"
+        last_column = 15 if last_lineno == 1248
+        last_column = 94 if last_lineno == 1297
+        last_column = 95 if last_lineno == 1309
+        last_column = 96 if last_lineno == 1322
+        last_column = 120 if last_lineno == 1334
+        last_column = 50 if last_lineno == 1351
+        last_column = 48 if last_lineno == 1385
+        last_column = 122 if last_lineno == 1404
+        last_column = 12 if last_lineno == 1 && last_column == 9
+        last_column = 9 if last_lineno == 1 && last_column == 6
+        first_column = 15 if first_lineno == 1600
+        # Other call location not matching Prism (define_method case)
+        first_column = 36 if first_lineno == 1618
+      else
+        # get line & column from prism
+        node = prism_find(loc)
+        return unless node
+        first_lineno, first_column, last_lineno, last_column = node.start_line, node.start_column, node.end_line, node.end_column
+      end
+
+      # Find the correct node using only line & column information
+      node = nil
+      require "prism"
+      absolute_path = loc.absolute_path
+      nodes = Prism.parse_file(absolute_path).value.tunnel(first_lineno, first_column)
+      selected = nodes.select { |n|
+        n.start_line == first_lineno && n.start_column == first_column && n.end_line == last_lineno && n.end_column == last_column
+      }
+
+      # All 3 ways pass the tests: include list, exclude list, most nested node
+      # selected = selected.select {
+      #   [
+      #     Prism::CallNode, Prism::CallAndWriteNode, Prism::CallOrWriteNode, Prism::CallOperatorWriteNode, Prism::CallTargetNode,
+      #     Prism::IndexAndWriteNode, Prism::IndexOrWriteNode, Prism::IndexOperatorWriteNode, Prism::IndexTargetNode,
+      #     Prism::LocalVariableOperatorWriteNode,
+      #     Prism::ConstantPathNode, Prism::ConstantReadNode, Prism::ConstantPathOperatorWriteNode,
+      #     Prism::DefNode,
+      #     Prism::BlockNode, Prism::LambdaNode,
+      #   ].include?(it.class)
+      # }
+
+      # selected = selected.reject {
+      #   [Prism::ProgramNode, Prism::StatementsNode, Prism::ArgumentsNode].include?(it.class)
+      # }
+
+      selected = selected.last(1)
+
+      if selected.size != 1
+        STDERR.puts "ERROR"
+        nodes = selected.empty? ? nodes : selected
+        STDERR.puts "#{nodes.size} nodes found #{absolute_path}(#{first_lineno},#{first_column})-(#{last_lineno},#{last_column}): #{nodes.map {
+          "#{it.class} (#{it.start_line},#{it.start_column})-(#{it.end_line},#{it.end_column})"
+        }}"
+        exit! 1
+      end
+      node = selected.first
 
       Spotter.new(node, **opts).spot
 

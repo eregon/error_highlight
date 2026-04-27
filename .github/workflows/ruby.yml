@@ -19,6 +19,7 @@ jobs:
     needs: ruby-versions
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         ruby: ${{ fromJson(needs.ruby-versions.outputs.versions) }}
     steps:
