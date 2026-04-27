@@ -4,3 +4,5 @@ gemspec
 
 gem "rake", "~> 13.0"
 gem "test-unit", "~> 3.0"
+
+gem "prism", "1.9.0" if RUBY_VERSION < "3.4"
